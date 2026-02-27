@@ -33,14 +33,25 @@ die()   { echo -e "${RED}❌ $*${NC}"; exit 1; }
 command -v nginx &>/dev/null || die "nginx not found in PATH"
 
 # ── Detect nginx version + build flags ───────────────────────────────────────
+# nginx -V writes to stderr; we capture both stdout+stderr.
+# IMPORTANT: grep only the 'configure arguments:' line first,
+# then strip the prefix — otherwise all other lines (version, gcc, openssl)
+# leak into the variable and cause "./configure: error: invalid option 'nginx'"
 NGINX_VER=$(nginx -v 2>&1 | grep -oP 'nginx/\K[0-9.]+')
-NGINX_BUILD_FLAGS=$(nginx -V 2>&1 | sed 's/.*configure arguments://')
+NGINX_BUILD_FLAGS=$(nginx -V 2>&1 \
+  | grep 'configure arguments:' \
+  | sed 's/.*configure arguments://' \
+  | xargs)   # strip leading/trailing whitespace
+
 MODULE_DIR="/usr/lib/nginx/modules"
 WORK_DIR="/tmp/nginx-modules-build-${NGINX_VER}"
 
-info "Nginx version: ${NGINX_VER}"
-info "Module dir:    ${MODULE_DIR}"
-info "Work dir:      ${WORK_DIR}"
+info "Nginx version:  ${NGINX_VER}"
+info "Module dir:     ${MODULE_DIR}"
+info "Work dir:       ${WORK_DIR}"
+echo ""
+info "Configure flags (first 120 chars):"
+echo "  ${NGINX_BUILD_FLAGS:0:120}..."
 echo ""
 
 # ── Build dependencies ───────────────────────────────────────────────────────
@@ -71,11 +82,11 @@ info "Cloning module sources..."
 
 git clone -q --depth=1 https://github.com/vision5/ngx_devel_kit.git
 NDK_VER=$(git -C ngx_devel_kit describe --tags 2>/dev/null || git -C ngx_devel_kit rev-parse --short HEAD)
-ok "ngx_devel_kit       @ ${NDK_VER}"
+ok "ngx_devel_kit          @ ${NDK_VER}"
 
 git clone -q --depth=1 https://github.com/openresty/set-misc-nginx-module.git
 SMV=$(git -C set-misc-nginx-module describe --tags 2>/dev/null || git -C set-misc-nginx-module rev-parse --short HEAD)
-ok "set-misc-nginx-module @ ${SMV}"
+ok "set-misc-nginx-module  @ ${SMV}"
 
 git clone -q --depth=1 https://github.com/leev/ngx_http_geoip2_module.git
 GEO_VER=$(git -C ngx_http_geoip2_module describe --tags 2>/dev/null || git -C ngx_http_geoip2_module rev-parse --short HEAD)
@@ -86,7 +97,8 @@ echo ""
 info "Running ./configure..."
 cd "nginx-${NGINX_VER}"
 
-# Append our dynamic modules to the original configure flags
+# Append our dynamic modules to the original configure flags.
+# Word-splitting of NGINX_BUILD_FLAGS is intentional here.
 # shellcheck disable=SC2086
 ./configure ${NGINX_BUILD_FLAGS} \
     --add-dynamic-module=../ngx_devel_kit \
@@ -145,16 +157,20 @@ echo ""
 info "Restoring load_module directives in nginx.conf..."
 NGINX_CONF="/etc/nginx/nginx.conf"
 
-# Uncomment lines previously disabled (handles both '# loadmodule' and '# load_module ... # v1.28.0')
+# Uncomment lines previously disabled by the workaround scripts.
+# Handles patterns like:
+#   # load_module /path/to/ndk_http_module.so;
+#   # load_module ... # v1.28.0
+#   # load_module ... # DISABLED: ...
 sed -i \
   -e 's|^# \(load_module.*ndk_http_module\.so[^;]*;\).*|\1|' \
   -e 's|^# \(load_module.*ngx_http_set_misc_module\.so[^;]*;\).*|\1|' \
   -e 's|^# \(load_module.*ngx_http_geoip2_module\.so[^;]*;\).*|\1|' \
   "${NGINX_CONF}"
 
-# Restore geoip2 directives (remove '# DISABLED' suffix/prefix)
+# Restore geoip2 body directives (remove '# DISABLED' comments)
 sed -i 's|^# \(.*geoip2.*\) # DISABLED.*|\1|' "${NGINX_CONF}"
-sed -i 's|^# \(.*geoip2\b.*\)|\1|' "${NGINX_CONF}"
+sed -i 's|^# \(.*geoip2\b.*\)|\1|'            "${NGINX_CONF}"
 
 ok "nginx.conf restored"
 echo ""
@@ -171,7 +187,7 @@ if nginx -t 2>&1; then
   if systemctl is-active --quiet nginx.service; then
     echo ""
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${GREEN}  ✅  nginx ${NGINX_VER} + ALL MODULES RUNNING  ✅${NC}"
+    echo -e "${GREEN}  ✅  nginx ${NGINX_VER} + ALL MODULES RUNNING  ✅  ${NC}"
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
     nginx -V 2>&1 | head -2
